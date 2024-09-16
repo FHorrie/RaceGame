@@ -1,128 +1,137 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using UnityEngine;
+using UnityEngine.InputSystem;
+using UnityEngine.UIElements;
 
 public class CarMotion : MonoBehaviour
 {
-    //Spring Values
+    [SerializeField]
+    private float _maxTyreAngleDeg = 50f;
+    [SerializeField]
+    private float _maxSpeed = 20f;
 
-    [SerializeField]
-    private float _springStrength = 30000f;
-    [SerializeField]
-    //use formula (2 * sqrt(K * mass) * Zeta) = dampingDensity 
-    //Zeta between 0.2 and 1
-    //Chosen values give (min: 2190), (max: 10954)
-    private float _dampingDensity = 3000f;
-    [SerializeField]
-    private float _maxSpringOffset = 0.3f;
-    [SerializeField]
-    private float _restDist = 0.5f;
-    [SerializeField]
-    private float _wheelRadius = 0.25f;
-    [SerializeField]
-    private LayerMask _drivable;
+    private Vector3 _currentCarLocalVelocity;
+    private float _carVelocityRatio = 0f;
 
     private Rigidbody _carRb = null;
 
-    [SerializeField]
-    private Transform[] _tyreTransforms = null;
-
-    private const int WHEELCOUNT = 4;
-    private bool[] _wheelsGrounded = new bool[WHEELCOUNT];
-    private bool _isGrounded = false;
+    float _accelerateInput = 0f;
+    float _reverseInput = 0f;
+    float _steeringInput = 0f;
 
     [SerializeField]
-    private float _acceleration = 25f;
-    private float _deceleration = 10f;
-    private float _maxSpeed = 100f;
+    private AnimationCurve _torqueCurve;
 
-    private Vector3 _currentCarLocalVelocity = Vector3.zero;
-    private float _carVelocityRatio = 0f;
+    [SerializeField]
+    private AnimationCurve _steeringCurve;
+
+    [SerializeField]
+    private AnimationCurve _brakeCurve;
+
+    [SerializeField]
+    private CarWheel[] _steeringWheels;
+
+    [SerializeField]
+    private CarWheel[] _powerWheels;
+
+    [SerializeField]
+    private CarWheel[] _brakeWheels;
+
+    [SerializeField]
+    private Transform _COM;
 
     private void Start()
     {
         _carRb = GetComponent<Rigidbody>();
         if (_carRb == null)
+        {
             Debug.LogError("Rigdbody was not found");
+            return;
+        }
+
+        _carRb.centerOfMass = _COM.localPosition;
+
     }
 
     private void Update()
     {
-
+        TurnWheels();
     }
 
     private void FixedUpdate()
     {
-        UpdateSuspension();
-        GroundCheck();
+        CalculateCarVelocity();
+        Accelerate();
+        Brake();
     }
 
-
-
-    private void GroundCheck()
+    private void CalculateCarVelocity()
     {
-        int tempWheelsGrounded = 0;
+        _currentCarLocalVelocity = transform.InverseTransformDirection(_carRb.velocity);
+        _carVelocityRatio = _currentCarLocalVelocity.z / _maxSpeed;
+    }
 
-        for (int wheelIdx = 0; wheelIdx <  WHEELCOUNT; ++wheelIdx)
+    private void TurnWheels()
+    {
+        foreach(CarWheel wheel in _steeringWheels)
         {
-            if (_wheelsGrounded[wheelIdx])
-                ++tempWheelsGrounded;
-
-            if(tempWheelsGrounded > 1)
-                _isGrounded = true;
+            if(wheel.Flipped)
+                wheel.transform.localRotation = Quaternion.Euler(0, _maxTyreAngleDeg * _steeringCurve.Evaluate(_carVelocityRatio) * _steeringInput + 180, 0);
             else
-                _isGrounded = false;
+                wheel.transform.localRotation = Quaternion.Euler(0, _maxTyreAngleDeg * _steeringCurve.Evaluate(_carVelocityRatio) * _steeringInput, 0);
         }
     }
 
-    private void UpdateSuspension()
+    private void Accelerate()
     {
-        if (_carRb == null)
-            return;
-
-        for (int wheelIdx = 0; wheelIdx < WHEELCOUNT; ++wheelIdx)
+        foreach (CarWheel wheel in _powerWheels)
         {
-            //World space direction of spring force
-            Vector3 springDir = _tyreTransforms[wheelIdx].up;
+            if(_accelerateInput > 0.01 && _carVelocityRatio < 0.98f)
+                wheel.ApplyTorque(_torqueCurve.Evaluate(_carVelocityRatio) * _accelerateInput);
+        }
+    }
 
-            RaycastHit rayHit;
-
-            float maxLength = _restDist + _maxSpringOffset;
-
-            if (Physics.Raycast(_tyreTransforms[wheelIdx].position, -springDir, out rayHit, maxLength + _wheelRadius, _drivable))
+    private void Brake()
+    {
+        if (_carVelocityRatio > 0.1)
+            foreach (CarWheel wheel in _brakeWheels)
             {
-                _wheelsGrounded[wheelIdx] = true;
-
-                float curSpringLength = rayHit.distance - _wheelRadius;
-
-
-                //World space velocity of this tyre
-                Vector3 tyreWorldVel = _carRb.GetPointVelocity(_tyreTransforms[wheelIdx].position);
-
-                //Calc normalized offset
-                float springOffset = (_restDist - curSpringLength) / _maxSpringOffset;
-
-                //Calc velocity along spring dir
-                //Note: springDir is unit vector
-                float vel = Vector3.Dot(springDir, tyreWorldVel);
-
-                //Calculate force and apply at wheel point
-                //using simple spring formula:
-                //F = (Offset * SpringStrength) - (Vel * Damping)
-                float force = (_springStrength * springOffset) - (vel * _dampingDensity);
-                _carRb.AddForceAtPosition(force * springDir, _tyreTransforms[wheelIdx].position);
-
-                Debug.DrawLine(_tyreTransforms[wheelIdx].position, rayHit.point, Color.green);
+                wheel.BrakeFactor = 0.06f + (float)Math.Clamp((_brakeCurve.Evaluate(_carVelocityRatio) * _reverseInput), 0, 0.98);
             }
-            else
+        else
+        {
+            foreach (CarWheel wheel in _brakeWheels)
             {
-                _wheelsGrounded[wheelIdx] = true;
-
-                Debug.DrawLine(
-                    _tyreTransforms[wheelIdx].position, 
-                    _tyreTransforms[wheelIdx].position + (_wheelRadius + maxLength) * -springDir, 
-                    Color.yellow);
+                wheel.BrakeFactor = 0.02f;
+            }
+            foreach (CarWheel wheel in _powerWheels)
+            {
+                wheel.BrakeFactor = 0.02f;
+                if (_reverseInput > 0.01 && _carVelocityRatio > -0.28f)
+                    wheel.ApplyTorque(-_torqueCurve.Evaluate(_carVelocityRatio) * _reverseInput);
             }
         }
     }
+
+    #region inputHandling
+
+    void OnDrive(InputValue triggerValue)
+    {
+        _accelerateInput = triggerValue.Get<float>();
+    }
+
+    void OnBrake(InputValue triggerValue)
+    {
+        _reverseInput = triggerValue.Get<float>();
+    }
+
+    void OnSteering(InputValue stickValue) 
+    {
+        _steeringInput = stickValue.Get<float>();
+    }
+
+    #endregion
 }
