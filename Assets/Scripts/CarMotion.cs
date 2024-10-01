@@ -13,8 +13,11 @@ public class CarMotion : MonoBehaviour
     [SerializeField]
     private float _maxSpeed = 20f;
 
+    private float _gearMaxSpeed = 0f;
+
     private Vector3 _currentCarLocalVelocity;
-    private float _carVelocityRatio = 0f;
+    private float _carCurrentVelocityRatio = 0f;
+    private float _carMaxVelocityRatio = 0f;
 
     private Rigidbody _carRb = null;
 
@@ -41,7 +44,30 @@ public class CarMotion : MonoBehaviour
     private CarWheel[] _brakeWheels;
 
     [SerializeField]
+    private float[] _forwardGearRatios;
+
+    [SerializeField]
+    private float _reverseGearRatio = 0;
+
+    private int _currentGear = 0;
+
+    [SerializeField]
     private Transform _COM;
+
+    public float MaxSpeed
+    {
+        get { return _maxSpeed; }
+    }
+
+    public float GearMaxSpeed
+    {
+        get { return _gearMaxSpeed; }
+    }
+
+    public float CarCurrentVelocityRatio
+    {
+        get { return _carCurrentVelocityRatio; }
+    }
 
     private void Start()
     {
@@ -70,8 +96,8 @@ public class CarMotion : MonoBehaviour
 
     private void CalculateCarVelocity()
     {
-        _currentCarLocalVelocity = transform.InverseTransformDirection(_carRb.velocity);
-        _carVelocityRatio = _currentCarLocalVelocity.z / _maxSpeed;
+        _carCurrentVelocityRatio = Mathf.Clamp01(_carRb.velocity.sqrMagnitude / (_gearMaxSpeed * _gearMaxSpeed));
+        _carMaxVelocityRatio = Mathf.Clamp01(_carRb.velocity.sqrMagnitude / (_maxSpeed * _maxSpeed));
     }
 
     private void TurnWheels()
@@ -79,58 +105,100 @@ public class CarMotion : MonoBehaviour
         foreach(CarWheel wheel in _steeringWheels)
         {
             if(wheel.Flipped)
-                wheel.transform.localRotation = Quaternion.Euler(0, _maxTyreAngleDeg * _steeringCurve.Evaluate(_carVelocityRatio) * _steeringInput + 180, 0);
+                wheel.transform.localRotation = Quaternion.Euler(0, _maxTyreAngleDeg * _steeringCurve.Evaluate(_carMaxVelocityRatio) * _steeringInput + 180, 0);
             else
-                wheel.transform.localRotation = Quaternion.Euler(0, _maxTyreAngleDeg * _steeringCurve.Evaluate(_carVelocityRatio) * _steeringInput, 0);
+                wheel.transform.localRotation = Quaternion.Euler(0, _maxTyreAngleDeg * _steeringCurve.Evaluate(_carMaxVelocityRatio) * _steeringInput, 0);
         }
     }
 
     private void Accelerate()
     {
+        //Split available torque over power wheels
+        float torquePerWheel = 1f;
+        int torqueSplit = 0;
         foreach (CarWheel wheel in _powerWheels)
         {
-            if(_accelerateInput > 0.01 && _carVelocityRatio < 0.98f)
-                wheel.ApplyTorque(_torqueCurve.Evaluate(_carVelocityRatio) * _accelerateInput);
+            if (wheel.IsGrounded)
+                torqueSplit++;
+        }
+
+        if(torqueSplit > 0)
+            torquePerWheel /= torqueSplit;
+
+        //Add torque to wheels
+        foreach (CarWheel wheel in _powerWheels)
+        {
+            if(_accelerateInput > 0.01f && _carCurrentVelocityRatio < 0.98f)
+            {
+                wheel.ApplyTorque(_torqueCurve.Evaluate(_carCurrentVelocityRatio) * _accelerateInput * torquePerWheel * Mathf.Sign(_currentGear));
+            }
         }
     }
 
     private void Brake()
     {
-        if (_carVelocityRatio > 0.1)
+        if (_carCurrentVelocityRatio > 0.01f)
             foreach (CarWheel wheel in _brakeWheels)
             {
-                wheel.BrakeFactor = 0.06f + (float)Math.Clamp((_brakeCurve.Evaluate(_carVelocityRatio) * _reverseInput), 0, 0.98);
+                wheel.BrakeFactor = wheel.BaseBrakeFactor + (float)Math.Clamp(_brakeCurve.Evaluate(_carCurrentVelocityRatio) * _reverseInput, 0, 1 - (double)wheel.BaseBrakeFactor);
             }
         else
-        {
             foreach (CarWheel wheel in _brakeWheels)
             {
-                wheel.BrakeFactor = 0.02f;
+                wheel.BrakeFactor = wheel.BaseBrakeFactor;
             }
-            foreach (CarWheel wheel in _powerWheels)
-            {
-                wheel.BrakeFactor = 0.02f;
-                if (_reverseInput > 0.01 && _carVelocityRatio > -0.28f)
-                    wheel.ApplyTorque(-_torqueCurve.Evaluate(_carVelocityRatio) * _reverseInput);
-            }
-        }
+    }
+
+    private void SetGearRatio()
+    {
+        //Forward Gear
+        if (_currentGear > 0)
+            _gearMaxSpeed = _maxSpeed * _forwardGearRatios[_currentGear - 1];
+        //Neutral
+        else if (_currentGear == 0)
+            _gearMaxSpeed = 0;
+        //Reverse Gear
+        else
+            _gearMaxSpeed = -_maxSpeed * _reverseGearRatio;
+
+        Debug.Log(_currentGear);
+        Debug.Log(_gearMaxSpeed);
     }
 
     #region inputHandling
 
-    void OnDrive(InputValue triggerValue)
+    private void OnDrive(InputValue triggerValue)
     {
         _accelerateInput = triggerValue.Get<float>();
     }
 
-    void OnBrake(InputValue triggerValue)
+    private void OnBrake(InputValue triggerValue)
     {
         _reverseInput = triggerValue.Get<float>();
     }
 
-    void OnSteering(InputValue stickValue) 
+    private void OnSteering(InputValue stickValue) 
     {
         _steeringInput = stickValue.Get<float>();
+    }
+
+    private void OnShiftUp(InputValue buttonValue)
+    {
+        if (_currentGear < _forwardGearRatios.Length)
+        {
+            _currentGear++;
+            SetGearRatio();
+        }
+
+    }
+
+    private void OnShiftDown(InputValue buttonValue)
+    {
+        if(_currentGear > -1)
+        {
+            _currentGear--;
+            SetGearRatio();
+        }
     }
 
     #endregion
